@@ -87,9 +87,13 @@ function parseTorrent(buf) {
 
 /* ---------- stremio addon ---------- */
 
+// Edit this list to add or remove categories (then reinstall the addon in Stremio)
+const CATEGORIES = ['Top Picks', 'Family', 'DC Marvel', 'Horror', 'Kids'];
+const slug = c => 'cat-' + c.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
 const manifest = {
   id: 'org.myname.myaddon',
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'My Movie Addon',
   description: 'My personal movie library',
   resources: [
@@ -99,13 +103,20 @@ const manifest = {
   ],
   types: ['movie'],
   catalogs: [{ type: 'movie', id: 'mylibrary', name: 'My Library' }]
+    .concat(CATEGORIES.map(c => ({ type: 'movie', id: slug(c), name: c })))
 };
 
 app.get('/', (req, res) => res.send('Addon is running'));
 app.get('/manifest.json', (req, res) => res.json(manifest));
 
-app.get('/catalog/movie/mylibrary.json', async (req, res) => {
-  const { data } = await supabase.from('movies').select('*').order('name');
+app.get(['/catalog/movie/:id.json', '/catalog/movie/:id/:extra.json'], async (req, res) => {
+  let q = supabase.from('movies').select('*').order('name');
+  if (req.params.id !== 'mylibrary') {
+    const cat = CATEGORIES.find(c => slug(c) === req.params.id);
+    if (!cat) return res.json({ metas: [] });
+    q = q.contains('genres', [cat]);
+  }
+  const { data } = await q;
   const metas = (data || []).map(m => ({
     id: m.id, type: 'movie', name: m.name, poster: m.poster,
     releaseInfo: m.year ? String(m.year) : undefined
@@ -118,7 +129,8 @@ app.get('/meta/movie/:id.json', async (req, res) => {
   if (!data) return res.json({ meta: null });
   res.json({ meta: {
     id: data.id, type: 'movie', name: data.name, poster: data.poster,
-    background: data.poster, releaseInfo: data.year ? String(data.year) : undefined
+    background: data.poster, releaseInfo: data.year ? String(data.year) : undefined,
+    genres: data.genres || []
   }});
 });
 
@@ -178,7 +190,7 @@ app.post('/api/delete', async (req, res) => {
 
 app.post('/api/add', async (req, res) => {
   try {
-    let { id, name, year, poster, qualities } = req.body;
+    let { id, name, year, poster, qualities, genres } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: 'Movie name is required' });
     name = name.trim();
     const m = (id || '').match(/tt\d+/);
@@ -186,12 +198,15 @@ app.post('/api/add', async (req, res) => {
     if (!id) {
       id = 'my:' + name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + (year ? '-' + year : '');
     }
-    const { error: e1 } = await supabase.from('movies').upsert({
+    const row = {
       id, name,
       year: year ? parseInt(year) : null,
       poster: poster && poster.trim() ? poster.trim()
         : (id.startsWith('tt') ? 'https://images.metahub.space/poster/medium/' + id + '/img' : null)
-    });
+    };
+    // only overwrite categories when some are ticked, so re-saving never wipes them
+    if (Array.isArray(genres) && genres.length) row.genres = genres;
+    const { error: e1 } = await supabase.from('movies').upsert(row);
     if (e1) throw new Error(e1.message);
 
     let added = 0;
@@ -276,6 +291,10 @@ button.big{width:100%;font-size:17px;padding:15px;margin-top:22px}
 #msg{margin-top:16px;padding:12px;border-radius:4px;display:none;font-weight:700}
 .ok{background:#1c3b22;color:#7dd68d}
 .err{background:#3b1c1c;color:#ff8a8a}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chips label{margin:0;padding:8px 14px;background:#333;border-radius:20px;cursor:pointer;color:#fff;font-size:14px;user-select:none}
+.chips input{width:auto;margin-right:6px}
+.chips label.on{background:#E50914}
 .item{display:flex;align-items:center;gap:12px;padding:10px;background:#181818;border-radius:6px;margin-bottom:8px}
 .item img{width:40px;height:58px;object-fit:cover;border-radius:3px;background:#222}
 .item div{flex:1}
@@ -297,6 +316,9 @@ button.big{width:100%;font-size:17px;padding:15px;margin-top:22px}
   <div><label>Poster URL (optional)</label><input id="poster" placeholder="auto-filled when you pick a movie"></div>
 </div>
 
+<h2>Categories</h2>
+<div id="cats" class="chips"></div>
+
 <h2>2. Add links</h2>
 <div id="cards" class="cards"></div>
 
@@ -309,6 +331,16 @@ button.big{width:100%;font-size:17px;padding:15px;margin-top:22px}
 </div>
 <script>
 var QUAL=['1080p','4K'];
+var CATS=${JSON.stringify(CATEGORIES)};
+CATS.forEach(function(c){
+  var l=document.createElement('label');
+  l.innerHTML='<input type="checkbox" value="'+c+'">'+c;
+  l.querySelector('input').onchange=function(){l.className=this.checked?'on':'';};
+  document.getElementById('cats').appendChild(l);
+});
+function getCats(){
+  return Array.prototype.map.call(document.querySelectorAll('#cats input:checked'),function(i){return i.value;});
+}
 var selected=null;
 var found=[];
 
@@ -390,7 +422,8 @@ async function save(){
     name:name,
     year:document.getElementById('year').value,
     poster:document.getElementById('poster').value,
-    qualities:qualities
+    qualities:qualities,
+    genres:getCats()
   };
   show('Saving...',true);
   var r=await fetch('/api/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -413,7 +446,7 @@ async function loadList(){
     var t=document.createElement('div');
     t.innerHTML='<b></b><br><small></small>';
     t.querySelector('b').textContent=m.name+(m.year?' ('+m.year+')':'');
-    t.querySelector('small').textContent=m.id+'  \u2022  '+(m.qualities.join(', ')||'no links');
+    t.querySelector('small').textContent=m.id+'  \u2022  '+(m.qualities.join(', ')||'no links')+'  \u2022  '+((m.genres||[]).join(', ')||'no categories');
     var b=document.createElement('button');
     b.className='grey';
     b.textContent='Delete';
